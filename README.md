@@ -1,6 +1,6 @@
 # `toy_pool`
 
-Items in the pool are reference-counted by strong `Handle` s. When no `Handle` is referring to an item, it can be removed with `Pool::sync_refcounts_and_invalidate`, or you can handle removal with `Pool::sync_refcounts` and `Pool::invalidate_unreferenced`.
+Items in the pool will be reference-counted with strong `Handle` s. When no `Handle` is referring to an item, it can be removed on synchronization, or you can handle it manually.
 
 ## Motivation
 

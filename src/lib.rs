@@ -151,7 +151,10 @@ impl<T> Pool<T> {
             tx,
         }
     }
+}
 
+/// # ----- Reference counter synchronization --
+impl<T> Pool<T> {
     /// Update reference counts letting user visit item with zero reference counts
     pub fn sync_refcounts(&mut self, mut on_zero: impl FnMut(&mut Self, Slot)) {
         while let Some(mes) = self.rx.recv() {
@@ -237,9 +240,9 @@ impl<T> Pool<T> {
     }
 
     /// Tries to get a reference from a [`WeakHandle`]
-    pub fn get(&self, weak_handle: &WeakHandle<T>) -> Option<&T> {
-        let entry = &self.entries[weak_handle.slot.to_usize()];
-        if entry.gen == weak_handle.gen {
+    pub fn get(&self, weak: &WeakHandle<T>) -> Option<&T> {
+        let entry = &self.entries[weak.slot.to_usize()];
+        if entry.gen == weak.gen {
             entry.data.as_ref()
         } else {
             None
@@ -247,28 +250,10 @@ impl<T> Pool<T> {
     }
 
     /// Tries to get a mutable reference from a [`WeakHandle`]
-    pub fn get_mut(&mut self, weak_handle: &WeakHandle<T>) -> Option<&mut T> {
-        let entry = &mut self.entries[weak_handle.slot.to_usize()];
-        if entry.gen == weak_handle.gen {
+    pub fn get_mut(&mut self, weak: &WeakHandle<T>) -> Option<&mut T> {
+        let entry = &mut self.entries[weak.slot.to_usize()];
+        if entry.gen == weak.gen {
             entry.data.as_mut()
-        } else {
-            None
-        }
-    }
-
-    pub fn upgrade(&self, weak_handle: &WeakHandle<T>) -> Option<Handle<T>> {
-        let slot = weak_handle.slot.to_usize();
-        if slot > self.entries.len() {
-            return None;
-        }
-        let entry = &self.entries[slot];
-        if entry.gen == weak_handle.gen {
-            Some(Handle {
-                slot: weak_handle.slot,
-                gen: weak_handle.gen,
-                sender: self.tx.clone(),
-                _ty: PhantomData,
-            })
         } else {
             None
         }
@@ -294,30 +279,27 @@ impl<T> ops::IndexMut<&Handle<T>> for Pool<T> {
     }
 }
 
-impl<T> Pool<T> {
-    /// Returns iterator of valid items in this pool
-    pub fn iter(&self) -> impl Iterator<Item = &T>
-    where
-        T: 'static,
-    {
-        iter::Iter {
-            entries: self.entries.iter(),
-        }
-    }
-
-    /// Returns mutable iterator of valid items in this pool
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T>
-    where
-        T: 'static,
-    {
-        iter::IterMut {
-            entries: self.entries.iter_mut(),
-        }
-    }
-}
-
 /// # ----- Slot-based accessors -----
 impl<T> Pool<T> {
+    /// Tries to upgrade the weak handle to a strong handle. Fails if it's already removed
+    pub fn upgrade(&self, weak: &WeakHandle<T>) -> Option<Handle<T>> {
+        let slot = weak.slot.to_usize();
+        if slot > self.entries.len() {
+            return None;
+        }
+        let entry = &self.entries[slot];
+        if entry.gen == weak.gen {
+            Some(Handle {
+                slot: weak.slot,
+                gen: weak.gen,
+                sender: self.tx.clone(),
+                _ty: PhantomData,
+            })
+        } else {
+            None
+        }
+    }
+
     /// Retruns the item if it's valid
     pub fn get_by_slot(&self, slot: Slot) -> Option<&T> {
         let entry = self.entries.get(slot.to_usize())?;
@@ -330,7 +312,7 @@ impl<T> Pool<T> {
         entry.data.as_mut()
     }
 
-    // TODO: use specific iterator?
+    /// Returns slots of existing items
     pub fn slots(&self) -> impl Iterator<Item = Slot> + '_ {
         self.entries.iter().enumerate().filter_map(|(i, entry)| {
             if entry.data.is_some() {
@@ -340,8 +322,31 @@ impl<T> Pool<T> {
             }
         })
     }
+}
 
-    /// Iterator of `(Slot, &T)`
+/// # ----- Iterators -----
+impl<T> Pool<T> {
+    /// Returns an iterator of valid items in this pool
+    pub fn iter(&self) -> impl Iterator<Item = &T>
+    where
+        T: 'static,
+    {
+        iter::Iter {
+            entries: self.entries.iter(),
+        }
+    }
+
+    /// Returns an mutable iterator of valid items in this pool
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T>
+    where
+        T: 'static,
+    {
+        iter::IterMut {
+            entries: self.entries.iter_mut(),
+        }
+    }
+
+    /// Returns an iterator of `(Slot, &T)`
     pub fn enumerate_items(&self) -> impl Iterator<Item = (Slot, &T)> {
         self.entries.iter().enumerate().filter_map(|(i, entry)| {
             if let Some(data) = &entry.data {
@@ -352,7 +357,7 @@ impl<T> Pool<T> {
         })
     }
 
-    /// Iterator of `(Slot, &mut T)`
+    /// Returns an iterator of `(Slot, &mut T)`
     pub fn enumerate_items_mut(&mut self) -> impl Iterator<Item = (Slot, &mut T)> {
         self.entries
             .iter_mut()
