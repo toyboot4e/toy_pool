@@ -12,11 +12,11 @@ impl<'a, T: 'static> Iterator for Iter<'a, T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            let e = self.entries.next()?;
-            if e.gen.is_none() {
+            let entry = self.entries.next()?;
+            if entry.data.is_none() {
                 continue;
             }
-            return Some(&e.item);
+            return entry.data.as_ref();
         }
     }
 }
@@ -31,11 +31,11 @@ impl<'a, T: 'static> Iterator for IterMut<'a, T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            let e = self.entries.next()?;
-            if e.gen.is_none() {
+            let entry = self.entries.next()?;
+            if entry.data.is_none() {
                 continue;
             }
-            return Some(&mut e.item);
+            return entry.data.as_mut();
         }
     }
 }

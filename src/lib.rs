@@ -13,7 +13,9 @@ use crate::smpsc::{Receiver, Sender};
 
 type Gen = std::num::NonZeroU32;
 type GenCounter = u32;
-type RefCount = u16;
+
+/// Number of existable references = `RefCount::MAX - 1`
+pub type RefCount = u16;
 
 /// Newtype of `u32`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -36,6 +38,7 @@ enum Message {
 #[derive(Debug)]
 pub struct Handle<T> {
     slot: Slot,
+    /// For downgrading to weak handle
     gen: Gen,
     sender: Sender<Message>,
     _ty: PhantomData<fn() -> T>,
@@ -93,6 +96,7 @@ impl<T> Drop for Handle<T> {
 #[derivative(Debug, PartialEq, Clone, Copy)]
 pub struct WeakHandle<T> {
     slot: Slot,
+    /// For distingushing original item
     gen: Gen,
     _ty: PhantomData<fn() -> T>,
 }
@@ -117,9 +121,8 @@ impl<T> From<Handle<T>> for WeakHandle<T> {
 #[derive(Debug, Clone)]
 pub(crate) struct PoolEntry<T> {
     // TODO: refactor using an enum
-    item: T,
-    /// None if this entry is invalid
-    gen: Option<Gen>,
+    data: Option<T>,
+    gen: Gen,
     ref_count: RefCount,
 }
 
@@ -147,8 +150,8 @@ impl<T> Pool<T> {
         }
     }
 
-    /// Update reference counting of internal items and remove unreferenced nodes
-    pub fn sync_refcounts(&mut self) {
+    /// Update reference counting of internal items and invalidates unreferenced items
+    pub fn sync_refcounts_and_invalidate(&mut self) {
         while let Some(mes) = self.rx.recv() {
             match mes {
                 Message::New(slot) => {
@@ -159,7 +162,7 @@ impl<T> Pool<T> {
                     let entry = &mut self.entries[slot.to_usize()];
                     entry.ref_count -= 1;
                     if entry.ref_count == 0 {
-                        entry.gen = None;
+                        entry.data = None;
                     }
                 }
             }
@@ -175,10 +178,11 @@ impl<T> Pool<T> {
 
 /// # ----- Handle-based accessors -----
 impl<T> Pool<T> {
+    /// TODO: Consider tracking empty slot
     fn find_empty_slot(&mut self) -> Option<usize> {
         for i in 0..self.entries.len() {
-            if let Some(e) = self.entries.get(i) {
-                if e.gen.is_none() {
+            if let Some(entry) = self.entries.get(i) {
+                if entry.data.is_none() {
                     return Some(i);
                 }
             }
@@ -186,15 +190,15 @@ impl<T> Pool<T> {
         None
     }
 
-    /// Returns a reference-counted [`Handle`] for the given item
+    /// Inserts the item and returns a strong [`Handle`] for it
     pub fn add(&mut self, item: impl Into<T>) -> Handle<T> {
         let item = item.into();
 
-        let gen = Gen::new(self.gen_count);
+        let gen = Gen::new(self.gen_count).expect("Generation overflow");
 
         let entry = PoolEntry {
-            item,
-            gen: gen.clone(),
+            data: Some(item),
+            gen,
             ref_count: 1, // !
         };
 
@@ -214,31 +218,45 @@ impl<T> Pool<T> {
 
         Handle {
             slot: Slot(slot as u32),
-            gen: gen.unwrap(),
+            gen,
             sender: self.tx.clone(),
             _ty: Default::default(),
         }
     }
 
     /// Tries to get a reference from a [`WeakHandle`]
-    ///
-    /// For strong [`Handle`]s, use index (`pool[handle]`).
     pub fn get(&self, weak_handle: &WeakHandle<T>) -> Option<&T> {
         let entry = &self.entries[weak_handle.slot.to_usize()];
-        if entry.gen == Some(weak_handle.gen) {
-            Some(&entry.item)
+        if entry.gen == weak_handle.gen {
+            entry.data.as_ref()
         } else {
             None
         }
     }
 
     /// Tries to get a mutable reference from a [`WeakHandle`]
-    ///
-    /// For strong [`Handle`]s, use index (`pool[handle]`).
     pub fn get_mut(&mut self, weak_handle: &WeakHandle<T>) -> Option<&mut T> {
         let entry = &mut self.entries[weak_handle.slot.to_usize()];
-        if entry.gen == Some(weak_handle.gen) {
-            Some(&mut entry.item)
+        if entry.gen == weak_handle.gen {
+            entry.data.as_mut()
+        } else {
+            None
+        }
+    }
+
+    pub fn upgrade(&self, weak_handle: &WeakHandle<T>) -> Option<Handle<T>> {
+        let slot = weak_handle.slot.to_usize();
+        if slot > self.entries.len() {
+            return None;
+        }
+        let entry = &self.entries[slot];
+        if entry.gen == weak_handle.gen {
+            Some(Handle {
+                slot: weak_handle.slot,
+                gen: weak_handle.gen,
+                sender: self.tx.clone(),
+                _ty: PhantomData,
+            })
         } else {
             None
         }
@@ -248,35 +266,24 @@ impl<T> Pool<T> {
 impl<T> ops::Index<&Handle<T>> for Pool<T> {
     type Output = T;
     fn index(&self, handle: &Handle<T>) -> &Self::Output {
-        &self.entries[handle.slot.to_usize()].item
+        self.entries[handle.slot.to_usize()]
+            .data
+            .as_ref()
+            .expect("dropped entry data while there's strong handle!")
     }
 }
 
 impl<T> ops::IndexMut<&Handle<T>> for Pool<T> {
     fn index_mut(&mut self, handle: &Handle<T>) -> &mut Self::Output {
-        &mut self.entries[handle.slot.to_usize()].item
-    }
-}
-
-impl<T> ops::Index<&WeakHandle<T>> for Pool<T> {
-    type Output = T;
-    fn index(&self, handle: &WeakHandle<T>) -> &Self::Output {
-        let entry = &self.entries[handle.slot.to_usize()];
-        assert!(entry.gen == Some(handle.gen));
-        &entry.item
-    }
-}
-
-impl<T> ops::IndexMut<&WeakHandle<T>> for Pool<T> {
-    fn index_mut(&mut self, handle: &WeakHandle<T>) -> &mut Self::Output {
-        let entry = &mut self.entries[handle.slot.to_usize()];
-        assert!(entry.gen == Some(handle.gen));
-        &mut entry.item
+        self.entries[handle.slot.to_usize()]
+            .data
+            .as_mut()
+            .expect("dropped entry data while there's strong handle!")
     }
 }
 
 impl<T> Pool<T> {
-    /// Iterator of valid items in this pool
+    /// Returns iterator of valid items in this pool
     pub fn iter(&self) -> impl Iterator<Item = &T>
     where
         T: 'static,
@@ -286,7 +293,7 @@ impl<T> Pool<T> {
         }
     }
 
-    /// Mutable iterator of valid items in this pool
+    /// Returns mutable iterator of valid items in this pool
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T>
     where
         T: 'static,
@@ -302,29 +309,35 @@ impl<T> Pool<T> {
     /// Retruns the item if it's valid
     pub fn get_by_slot(&self, slot: Slot) -> Option<&T> {
         let entry = self.entries.get(slot.to_usize())?;
-        entry.gen.and(Some(&entry.item))
+        entry.data.as_ref()
     }
 
     /// Retruns the item if it's valid
     pub fn get_mut_by_slot(&mut self, slot: Slot) -> Option<&mut T> {
         let entry = self.entries.get_mut(slot.to_usize())?;
-        entry.gen.and(Some(&mut entry.item))
+        entry.data.as_mut()
     }
 
     // TODO: use specific iterator?
     pub fn slots(&self) -> impl Iterator<Item = Slot> + '_ {
-        self.entries
-            .iter()
-            .enumerate()
-            .filter_map(|(i, entry)| entry.gen.and(Some(Slot(i as u32))))
+        self.entries.iter().enumerate().filter_map(|(i, entry)| {
+            if entry.data.is_some() {
+                Some(Slot(i as u32))
+            } else {
+                None
+            }
+        })
     }
 
     /// Iterator of `(Slot, &T)`
     pub fn enumerate_items(&self) -> impl Iterator<Item = (Slot, &T)> {
-        self.entries
-            .iter()
-            .enumerate()
-            .filter_map(|(i, entry)| entry.gen.and(Some((Slot(i as u32), &entry.item))))
+        self.entries.iter().enumerate().filter_map(|(i, entry)| {
+            if let Some(data) = &entry.data {
+                Some((Slot(i as u32), data))
+            } else {
+                None
+            }
+        })
     }
 
     /// Iterator of `(Slot, &mut T)`
@@ -332,6 +345,12 @@ impl<T> Pool<T> {
         self.entries
             .iter_mut()
             .enumerate()
-            .filter_map(|(i, entry)| entry.gen.and(Some((Slot(i as u32), &mut entry.item))))
+            .filter_map(|(i, entry)| {
+                if let Some(data) = &mut entry.data {
+                    Some((Slot(i as u32), data))
+                } else {
+                    None
+                }
+            })
     }
 }
