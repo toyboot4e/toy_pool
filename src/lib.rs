@@ -12,7 +12,6 @@ use derivative::Derivative;
 use crate::smpsc::{Receiver, Sender};
 
 type Gen = std::num::NonZeroU32;
-type GenCounter = u32;
 
 /// Number of existable references = `RefCount::MAX - 1`
 pub type RefCount = u16;
@@ -131,8 +130,6 @@ pub(crate) struct PoolEntry<T> {
 pub struct Pool<T> {
     /// NOTE: we never call [`Vec::remove`]; it aligns (change positions of) other items.
     entries: Vec<PoolEntry<T>>,
-    /// Generation counter per [`Pool`]. Another option is per slot.
-    gen_count: GenCounter,
     /// Receiver
     rx: Receiver<Message>,
     /// Sender. Cloned and passed to [`Handle`]s
@@ -144,7 +141,6 @@ impl<T> Pool<T> {
         let (tx, rx) = smpsc::unbounded();
         Self {
             entries: Vec::with_capacity(cap),
-            gen_count: 1,
             rx,
             tx,
         }
@@ -169,11 +165,6 @@ impl<T> Pool<T> {
         }
     }
 
-    // /// Force removing a reference-counted node
-    // pub unsafe fn remove_node(&mut self, slot: Slot) {
-    //     let entry = &mut self.entries[slot.as_usize()];
-    //     entry.gen = None;
-    // }
 }
 
 /// # ----- Handle-based accessors -----
@@ -194,25 +185,24 @@ impl<T> Pool<T> {
     pub fn add(&mut self, item: impl Into<T>) -> Handle<T> {
         let item = item.into();
 
-        let gen = Gen::new(self.gen_count).expect("Generation overflow");
-
-        let entry = PoolEntry {
-            data: Some(item),
-            gen,
-            ref_count: 1, // !
-        };
-
-        self.gen_count += 1;
-
-        let slot = match self.find_empty_slot() {
+        let (gen, slot) = match self.find_empty_slot() {
             Some(i) => {
-                self.entries[i] = entry;
-                i
+                let entry = &mut self.entries[i];
+                entry.data = Some(item);
+                entry.gen = Gen::new(entry.gen.get() + 1).expect("Generation overflow!");
+                (entry.gen, i)
             }
             None => {
+                let gen = unsafe { Gen::new_unchecked(1) };
+                let entry = PoolEntry {
+                    data: Some(item),
+                    gen,
+                    ref_count: 1, // !
+                };
+
                 let i = self.entries.len();
                 self.entries.push(entry);
-                i
+                (gen, i)
             }
         };
 
