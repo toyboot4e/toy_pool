@@ -146,8 +146,8 @@ impl<T> Pool<T> {
         }
     }
 
-    /// Update reference counting of internal items and invalidates unreferenced items
-    pub fn sync_refcounts_and_invalidate(&mut self) {
+    /// Update reference counts letting user visit item with zero reference counts
+    pub fn sync_refcounts(&mut self, mut on_zero: impl FnMut(&mut Self, Slot)) {
         while let Some(mes) = self.rx.recv() {
             match mes {
                 Message::New(slot) => {
@@ -158,13 +158,29 @@ impl<T> Pool<T> {
                     let entry = &mut self.entries[slot.to_usize()];
                     entry.ref_count -= 1;
                     if entry.ref_count == 0 {
-                        entry.data = None;
+                        on_zero(self, slot);
                     }
                 }
             }
         }
     }
 
+    /// Updates reference counts and invalidates unreferenced items
+    pub fn sync_refcounts_and_invalidate(&mut self) {
+        self.sync_refcounts(|p, slot| {
+            p.invalidate_unreferenced(slot);
+        })
+    }
+
+    /// Invalidates an entry with zero reference count manually
+    pub fn invalidate_unreferenced(&mut self, slot: Slot) -> bool {
+        let e = &mut self.entries[slot.to_usize()];
+        if e.data.is_none() {
+            return false;
+        }
+        e.data = None;
+        true
+    }
 }
 
 /// # ----- Handle-based accessors -----
