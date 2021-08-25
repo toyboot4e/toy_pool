@@ -2,8 +2,13 @@
 Pool with reference-counted items
 */
 
+// TODO: add length tracking and implement FuseIterator for iterator types
+
 pub mod iter;
 pub mod smpsc;
+
+#[cfg(test)]
+mod test;
 
 use std::{cmp, marker::PhantomData, ops, slice};
 
@@ -117,6 +122,7 @@ impl<T> From<Handle<T>> for WeakHandle<T> {
     }
 }
 
+// TODO: make it smaller
 #[derive(Debug, Clone)]
 pub(crate) struct PoolEntry<T> {
     // TODO: refactor using an enum
