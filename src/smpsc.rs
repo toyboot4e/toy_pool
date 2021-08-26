@@ -1,12 +1,10 @@
 /*!
-Single-threaded `mpsc` backed by `Rc<RefCell<Vec>>`, just for the API
-
-It's using `Vec` so events are received in reverse order.
+Single-threaded `mpsc` backed by `Rc<RefCell<VecDeque>>`, just for the API
 */
 
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
-type Queue<T> = Rc<RefCell<Vec<T>>>;
+type Queue<T> = Rc<RefCell<VecDeque<T>>>;
 
 /// Sender. Often referred to as `tx` (transmission)
 #[derive(Debug)]
@@ -14,7 +12,7 @@ pub struct Sender<T>(Queue<T>);
 
 impl<T> Sender<T> {
     pub fn send(&self, item: T) {
-        self.0.borrow_mut().push(item);
+        self.0.borrow_mut().push_back(item);
     }
 }
 
@@ -29,12 +27,13 @@ impl<T> Clone for Sender<T> {
 pub struct Receiver<T>(Queue<T>);
 
 impl<T> Receiver<T> {
+    /// FIFO event listening
     pub fn recv(&self) -> Option<T> {
-        self.0.borrow_mut().pop()
+        self.0.borrow_mut().pop_front()
     }
 }
 
 pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
-    let queue = Rc::new(RefCell::new(Vec::new()));
+    let queue = Rc::new(RefCell::new(VecDeque::new()));
     (Sender(queue.clone()), Receiver(queue))
 }

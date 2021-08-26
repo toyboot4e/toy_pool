@@ -1,5 +1,11 @@
 /*!
 Pool with reference-counted items
+
+Items in the [`Pool`] will be reference-counted with strong [`Handle`]s. When no [`Handle`] is
+referring to an item, it can be removed on synchronization, or you can handle it manually.
+
+Note that the pool does NOT drop unreferenced items until it's synced. Also it's single-thread only,
+for no particular reason.
 */
 
 // TODO: add length tracking and implement FuseIterator for iterator types
@@ -18,7 +24,7 @@ use crate::smpsc::{Receiver, Sender};
 
 type Gen = std::num::NonZeroU32;
 
-/// Number of existable references = `RefCount::MAX - 1`
+/// Type for reference counting
 pub type RefCount = u16;
 
 /// Newtype of `u32`
@@ -132,6 +138,8 @@ pub(crate) struct PoolEntry<T> {
 }
 
 /// Dynamic array with reference-counted [`Handle`]s
+///
+/// Be sure to call message syncing method to track reference counts.
 #[derive(Debug)]
 pub struct Pool<T> {
     /// NOTE: we never call [`Vec::remove`]; it aligns (change positions of) other items.
@@ -155,7 +163,7 @@ impl<T> Pool<T> {
 
 /// # ----- Reference counter synchronization --
 impl<T> Pool<T> {
-    /// Update reference counts letting user visit item with zero reference counts
+    /// Update reference counts letting user visit item with zero reference counts.
     pub fn sync_refcounts(&mut self, mut on_zero: impl FnMut(&mut Self, Slot)) {
         while let Some(mes) = self.rx.recv() {
             match mes {
@@ -184,6 +192,7 @@ impl<T> Pool<T> {
     /// Invalidates an entry with zero reference count manually
     pub fn invalidate_unreferenced(&mut self, slot: Slot) -> bool {
         let e = &mut self.entries[slot.to_usize()];
+        assert!(e.ref_count == 0);
         if e.data.is_none() {
             return false;
         }
@@ -222,7 +231,8 @@ impl<T> Pool<T> {
                 let entry = PoolEntry {
                     data: Some(item),
                     gen,
-                    ref_count: 1, // !
+                    // count the initial handle below
+                    ref_count: 1,
                 };
 
                 let i = self.entries.len();
@@ -263,31 +273,42 @@ impl<T> Pool<T> {
 impl<T> ops::Index<&Handle<T>> for Pool<T> {
     type Output = T;
     fn index(&self, handle: &Handle<T>) -> &Self::Output {
-        self.entries[handle.slot.to_usize()]
+        let entry = &self.entries[handle.slot.to_usize()];
+        debug_assert!(entry.ref_count > 0);
+        entry
             .data
             .as_ref()
-            .expect("dropped entry data while there's strong handle!")
+            .expect("dropped entry found while there's strong at least one handle!")
     }
 }
 
 impl<T> ops::IndexMut<&Handle<T>> for Pool<T> {
     fn index_mut(&mut self, handle: &Handle<T>) -> &mut Self::Output {
-        self.entries[handle.slot.to_usize()]
+        let entry = &mut self.entries[handle.slot.to_usize()];
+        debug_assert!(entry.ref_count > 0);
+        entry
             .data
             .as_mut()
-            .expect("dropped entry data while there's strong handle!")
+            .expect("dropped entry found while there's strong at least one handle!")
     }
 }
 
 /// # ----- Slot-based accessors -----
 impl<T> Pool<T> {
-    /// Tries to upgrade the weak handle to a strong handle. Fails if it's already removed
+    /// Tries to upgrade the weak handle to a strong handle. Fails if it's already removed or IF THE
+    /// REF COUNT IS ALREADY ZERO. This is for protecting [`Pool::sync_refcounts`], but this design
+    /// may change.
     pub fn upgrade(&self, weak: &WeakHandle<T>) -> Option<Handle<T>> {
         let slot = weak.slot.to_usize();
         if slot > self.entries.len() {
             return None;
         }
+
         let entry = &self.entries[slot];
+        if entry.ref_count == 0 {
+            return None;
+        }
+
         if entry.gen == weak.gen {
             Some(Handle {
                 slot: weak.slot,
@@ -312,7 +333,8 @@ impl<T> Pool<T> {
         entry.data.as_mut()
     }
 
-    /// Returns slots of existing items
+    /// Returns slots of existing items. NOTE: It contains unreferenced items as long as they're not
+    /// yet removed.
     pub fn slots(&self) -> impl Iterator<Item = Slot> + '_ {
         self.entries.iter().enumerate().filter_map(|(i, entry)| {
             if entry.data.is_some() {

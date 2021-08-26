@@ -1,4 +1,4 @@
-//! Iterator types of the pool
+//! Iterator types for the [`Pool`]
 
 use super::*;
 
