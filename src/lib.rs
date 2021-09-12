@@ -12,9 +12,13 @@ for no particular reason.
 
 pub mod iter;
 pub mod smpsc;
+pub mod tree;
 
 #[cfg(test)]
 mod test;
+
+#[cfg(feature = "igri")]
+use igri::Inspect;
 
 use std::{cmp, marker::PhantomData, ops, slice};
 
@@ -29,6 +33,7 @@ pub type RefCount = u16;
 
 /// Newtype of `u32`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "igri", derive(Inspect))]
 pub struct Slot(u32);
 
 impl Slot {
@@ -46,12 +51,22 @@ enum Message {
 
 /// Owing index to an item in a [`Pool`]
 #[derive(Debug)]
+#[cfg_attr(
+    feature = "igri",
+    derive(Inspect),
+    inspect(with = "inspect_handle", bounds = "")
+)]
 pub struct Handle<T> {
     slot: Slot,
     /// For downgrading to weak handle
     gen: Gen,
     sender: Sender<Message>,
     _ty: PhantomData<fn() -> T>,
+}
+
+#[cfg(feature = "igri")]
+fn inspect_handle<'a, T>(handle: &mut Handle<T>, ui: &igri::imgui::Ui, label: &str) {
+    igri::Inspect::inspect(&mut handle.slot.0, ui, label);
 }
 
 impl<T> cmp::PartialEq for Handle<T> {
@@ -104,11 +119,21 @@ impl<T> Drop for Handle<T> {
 /// The item is identified with generational index.
 #[derive(Derivative)]
 #[derivative(Debug, PartialEq, Clone, Copy)]
+#[cfg_attr(
+    feature = "igri",
+    derive(Inspect),
+    inspect(with = "inspect_weak_handle", bounds = "")
+)]
 pub struct WeakHandle<T> {
     slot: Slot,
     /// For distingushing original item
     gen: Gen,
     _ty: PhantomData<fn() -> T>,
+}
+
+#[cfg(feature = "igri")]
+fn inspect_weak_handle<'a, T>(handle: &mut WeakHandle<T>, ui: &igri::imgui::Ui, label: &str) {
+    igri::Inspect::inspect(&mut handle.slot.0, ui, label);
 }
 
 impl<T> WeakHandle<T> {
@@ -141,13 +166,28 @@ pub(crate) struct PoolEntry<T> {
 ///
 /// Be sure to call message syncing method to track reference counts.
 #[derive(Debug)]
+#[cfg_attr(
+    feature = "igri",
+    derive(Inspect),
+    inspect(with = "inspect_pool", bounds = "T: Inspect")
+)]
 pub struct Pool<T> {
     /// NOTE: we never call [`Vec::remove`]; it aligns (change positions of) other items.
     entries: Vec<PoolEntry<T>>,
     /// Receiver
+    #[cfg_attr(feature = "igri", inspect(skip))]
     rx: Receiver<Message>,
     /// Sender. Cloned and passed to [`Handle`]s
+    #[cfg_attr(feature = "igri", inspect(skip))]
     tx: Sender<Message>,
+}
+
+#[cfg(feature = "igri")]
+fn inspect_pool<'a, T>(pool: &'a mut Pool<T>, ui: &igri::imgui::Ui, label: &str)
+where
+    T: igri::Inspect,
+{
+    igri::seq(pool.entries.iter_mut().map(|e| &mut e.data), ui, label);
 }
 
 impl<T> Pool<T> {
