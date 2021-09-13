@@ -32,7 +32,7 @@ type Gen = std::num::NonZeroU32;
 pub type RefCount = u16;
 
 /// Newtype of `u32`
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "igri", derive(Inspect))]
 pub struct Slot(u32);
 
@@ -50,7 +50,8 @@ enum Message {
 }
 
 /// Owing index to an item in a [`Pool`]
-#[derive(Debug)]
+#[derive(Derivative)]
+#[derivative(Debug, PartialEq, Clone)]
 #[cfg_attr(
     feature = "igri",
     derive(Inspect),
@@ -60,6 +61,7 @@ pub struct Handle<T> {
     slot: Slot,
     /// For downgrading to weak handle
     gen: Gen,
+    #[derivative(PartialEq = "ignore")]
     sender: Sender<Message>,
     _ty: PhantomData<fn() -> T>,
 }
@@ -67,13 +69,6 @@ pub struct Handle<T> {
 #[cfg(feature = "igri")]
 fn inspect_handle<'a, T>(handle: &mut Handle<T>, ui: &igri::imgui::Ui, label: &str) {
     igri::Inspect::inspect(&mut handle.slot.0, ui, label);
-}
-
-impl<T> cmp::PartialEq for Handle<T> {
-    fn eq(&self, other: &Handle<T>) -> bool {
-        // WARNING: it doesn't consider belonging pool
-        self.gen == other.gen
-    }
 }
 
 impl<T> Handle<T> {
@@ -92,19 +87,6 @@ impl<T> Handle<T> {
 
     pub fn to_downgraded(&self) -> WeakHandle<T> {
         self.clone().downgrade()
-    }
-}
-
-impl<T> Clone for Handle<T> {
-    fn clone(&self) -> Self {
-        self.sender.send(Message::New(self.slot));
-
-        Self {
-            slot: self.slot,
-            gen: self.gen,
-            sender: self.sender.clone(),
-            _ty: Default::default(),
-        }
     }
 }
 
@@ -371,6 +353,22 @@ impl<T> Pool<T> {
     pub fn get_mut_by_slot(&mut self, slot: Slot) -> Option<&mut T> {
         let entry = self.entries.get_mut(slot.to_usize())?;
         entry.data.as_mut()
+    }
+
+    /// Retruns the item if it's valid
+    pub fn get2_mut_by_slot(&mut self, s0: Slot, s1: Slot) -> Option<(&mut T, &mut T)> {
+        assert_ne!(s0, s1);
+
+        let e0 = self
+            .entries
+            .get_mut(s0.to_usize())
+            .map(|e| e as *mut PoolEntry<T>)?;
+        let e1 = self.entries.get_mut(s1.to_usize())?;
+
+        let d0 = unsafe { &mut *e0 }.data.as_mut()?;
+        let d1 = e1.data.as_mut()?;
+
+        Some((d0, d1))
     }
 
     /// Returns slots of existing items. NOTE: It contains unreferenced items as long as they're not
