@@ -51,7 +51,7 @@ enum Message {
 
 /// Owing index to an item in a [`Pool`]
 #[derive(Derivative)]
-#[derivative(Debug, PartialEq, Clone)]
+#[derivative(Debug, PartialEq)]
 #[cfg_attr(
     feature = "igri",
     derive(Inspect),
@@ -64,6 +64,18 @@ pub struct Handle<T> {
     #[derivative(PartialEq = "ignore")]
     sender: Sender<Message>,
     _ty: PhantomData<fn() -> T>,
+}
+
+impl<T> Clone for Handle<T> {
+    fn clone(&self) -> Self {
+        self.sender.send(Message::New(self.slot));
+        Self {
+            slot: self.slot,
+            gen: self.gen,
+            sender: self.sender.clone(),
+            _ty: PhantomData,
+        }
+    }
 }
 
 #[cfg(feature = "igri")]
@@ -196,6 +208,7 @@ impl<T> Pool<T> {
                 Message::Drop(slot) => {
                     let entry = &mut self.entries[slot.to_usize()];
                     entry.ref_count -= 1;
+                    // TODO: the counter could increase later
                     if entry.ref_count == 0 {
                         on_zero(self, slot);
                     }
@@ -214,12 +227,13 @@ impl<T> Pool<T> {
     /// Invalidates an entry with zero reference count manually
     pub fn invalidate_unreferenced(&mut self, slot: Slot) -> bool {
         let e = &mut self.entries[slot.to_usize()];
-        assert!(e.ref_count == 0);
+        assert!(e.ref_count == 0, "tried to invalidate referenced item");
         if e.data.is_none() {
-            return false;
+            false
+        } else {
+            e.data = None;
+            true
         }
-        e.data = None;
-        true
     }
 }
 
@@ -244,21 +258,27 @@ impl<T> Pool<T> {
         let (gen, slot) = match self.find_empty_slot() {
             Some(i) => {
                 let entry = &mut self.entries[i];
+
                 entry.data = Some(item);
-                entry.gen = Gen::new(entry.gen.get() + 1).expect("Generation overflow!");
+                entry.gen = Gen::new(entry.gen.get() + 1).expect("generation overflow!");
+                // count the initial strong handle
+                entry.ref_count = 1;
+
                 (entry.gen, i)
             }
             None => {
                 let gen = unsafe { Gen::new_unchecked(1) };
+
                 let entry = PoolEntry {
                     data: Some(item),
                     gen,
-                    // count the initial handle below
+                    // count the initial strong handle
                     ref_count: 1,
                 };
 
                 let i = self.entries.len();
                 self.entries.push(entry);
+
                 (gen, i)
             }
         };
@@ -296,22 +316,28 @@ impl<T> ops::Index<&Handle<T>> for Pool<T> {
     type Output = T;
     fn index(&self, handle: &Handle<T>) -> &Self::Output {
         let entry = &self.entries[handle.slot.to_usize()];
-        debug_assert!(entry.ref_count > 0);
-        entry
-            .data
-            .as_ref()
-            .expect("dropped entry found while there's strong at least one handle!")
+        assert_eq!(entry.gen, handle.gen, "generation mismatch!");
+
+        debug_assert!(
+            entry.ref_count > 0,
+            "dropped entry found while there's at least one strong handle!"
+        );
+
+        entry.data.as_ref().unwrap()
     }
 }
 
 impl<T> ops::IndexMut<&Handle<T>> for Pool<T> {
     fn index_mut(&mut self, handle: &Handle<T>) -> &mut Self::Output {
         let entry = &mut self.entries[handle.slot.to_usize()];
-        debug_assert!(entry.ref_count > 0);
-        entry
-            .data
-            .as_mut()
-            .expect("dropped entry found while there's strong at least one handle!")
+        assert_eq!(entry.gen, handle.gen, "generation mismatch!");
+
+        debug_assert!(
+            entry.ref_count > 0,
+            "dropped entry found while there's at least one strong handle!"
+        );
+
+        entry.data.as_mut().unwrap()
     }
 }
 
