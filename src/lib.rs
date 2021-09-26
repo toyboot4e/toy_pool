@@ -181,7 +181,14 @@ fn inspect_pool<'a, T>(pool: &'a mut Pool<T>, ui: &igri::imgui::Ui, label: &str)
 where
     T: igri::Inspect,
 {
-    igri::seq(pool.entries.iter_mut().map(|e| &mut e.data), ui, label);
+    igri::seq_indexed(
+        pool.entries.iter_mut().enumerate().filter_map(|(i, e)| {
+            let data = e.data.as_mut()?;
+            Some((i, data))
+        }),
+        ui,
+        label,
+    );
 }
 
 impl<T> Pool<T> {
